@@ -97,7 +97,7 @@ fn run(audio_path: String, transcript_path: String, output_dir: String) -> Resul
   use _ <- result.try(file_io.make_dir(output_dir)
     |> result.map_error(fn(e) { "mkdir: " <> describe_file_error(e) }))
   let split_tasks = list.map(aligned, fn(t) {
-    #(t.audio_start_s, t.audio_end_s, output_dir <> "/" <> turn_filename(t.index))
+    #(t.audio_start_s, t.audio_end_s, output_dir <> "/" <> dialogue_types.turn_filename(t.index))
   })
   use _ <- result.try(splitter.batch_split(audio_path, split_tasks)
     |> result.map_error(fn(e) { describe_splitter_error(e) }))
@@ -157,27 +157,11 @@ fn filename_from_path(path: String) -> String {
   }
 }
 
-fn role_letter(role: dialogue_types.Role) -> String {
-  case role {
-    dialogue_types.Doctor -> "D"
-    dialogue_types.Patient -> "P"
-  }
-}
-
-fn turn_filename(index: Int) -> String {
-  let s = int.to_string(index)
-  case string.length(s) {
-    4 -> "turn_" <> s <> ".mp3"
-    n if n < 4 -> "turn_" <> string.repeat("0", 4 - n) <> s <> ".mp3"
-    _ -> "turn_" <> s <> ".mp3"
-  }
-}
-
 fn print_aligned_turn(t: aligner.AlignedTurn) -> Nil {
   let dur = t.audio_end_s -. t.audio_start_s
   let preview = string.slice(t.text, 0, 40)
   io.println(
-    "    [" <> int.to_string(t.index) <> "] " <> role_letter(t.role) <> " " <>
+    "    [" <> int.to_string(t.index) <> "] " <> dialogue_types.role_letter(t.role) <> " " <>
     float.to_string(t.audio_start_s) <> "s–" <>
     float.to_string(t.audio_end_s) <> "s (" <>
     float.to_string(dur) <> "s)  " <> preview,

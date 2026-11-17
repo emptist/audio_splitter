@@ -196,8 +196,11 @@ fn snap_to_silence(expected: Float, gaps: List(SilenceGap), window_s: Float) -> 
 fn finalize_boundaries(snapped: List(Float), audio_duration_s: Float) -> List(Float) {
   let with_front = [0.0, ..snapped]
   let with_edges = list.append(with_front, [audio_duration_s])
-  let monotonic = enforce_monotonic(with_edges, 0.0, [])
-  list.reverse(monotonic)
+  // First element (0.0 = audio start) is fixed — don't re-enforce it
+  case with_edges {
+    [first, ..rest] -> list.reverse(enforce_monotonic(rest, first, [first]))
+    _ -> list.reverse(enforce_monotonic(with_edges, 0.0, []))
+  }
 }
 
 fn enforce_monotonic(

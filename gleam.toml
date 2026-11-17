@@ -1,10 +1,8 @@
 name = "audio_splitter"
 version = "1.0.0"
 target = "erlang"
-
-# Standalone offline tool: transcribe dialogue audio with whisper_cpp,
-# align word timestamps to transcript turns, split mp3 per turn,
-# write JSON manifest. Generic — works with any D:/P: format dialogue.
+description = "Transcribe dialogue audio with whisper_cpp, align word timestamps to transcript turns, and split mp3 per turn into lossless per-turn clips with a JSON manifest. Generic — works with any D:/P: speaker-prefix dialogue format."
+licences = ["Apache-2.0"]
 
 [dependencies]
 gleam_stdlib = ">= 1.0.0 and < 2.0.0"
