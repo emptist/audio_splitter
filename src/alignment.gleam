@@ -18,6 +18,7 @@ import alignment/dialogue_types as dialogue_types
 import alignment/transcript_parser
 import alignment/whisper_driver as whisper
 import alignment/aligner
+import alignment/trigram_alignment as trigram
 import alignment/splitter
 import alignment/manifest
 import alignment/shell.{os_cmd, shell_quote}
@@ -65,9 +66,10 @@ fn run(audio_path: String, transcript_path: String, output_dir: String) -> Resul
 
   // 2. Decode mp3 → PCM via ffmpeg
   io.println("[2/6] Decoding mp3 → PCM...")
+  use actual_duration <- result.try(probe_duration(audio_path))
   let pcm_path = audio_path <> ".pcm"
   use _ <- result.try(decode_mp3_to_pcm(audio_path, pcm_path))
-  io.println("  PCM ready")
+  io.println("  PCM ready, source duration: " <> float.to_string(actual_duration) <> "s")
 
   // 3. Transcribe with whisper
   io.println("[3/6] Whisper transcription...")
@@ -85,12 +87,16 @@ fn run(audio_path: String, transcript_path: String, output_dir: String) -> Resul
   let all_words = aligner.transcription_words(transcription)
   io.println("  " <> int.to_string(list.length(all_words)) <> " word timestamps")
 
-  // 4. Align turns to timestamps
+  // 4. Align turns to timestamps — use actual audio duration, not whisper's
+  // (whisper can report a duration inflated by padding/silence)
   io.println("[4/6] Aligning...")
-  use aligned <- result.try(aligner.align_turns(turns, all_words, transcription.duration_s)
+  use aligned <- result.try(aligner.align_turns(turns, all_words, actual_duration)
     |> result.map_error(fn(e) { "aligner: " <> describe_align_error(e) }))
+  // Clamp any boundary that whispers last_word_end might have pushed past actual
+  let aligned = clamp_aligned_to_duration(aligned, actual_duration)
   io.println("  " <> int.to_string(list.length(aligned)) <> " turns aligned")
   list.each(aligned, print_aligned_turn)
+  print_confidence_summary(aligned)
 
   // 5. Split mp3 per turn
   io.println("[5/6] Splitting mp3...")
@@ -141,12 +147,68 @@ fn decode_mp3_to_pcm(input: String, output: String) -> Result(Nil, String) {
   }
 }
 
+fn probe_duration(path: String) -> Result(Float, String) {
+  let cmd =
+    "ffprobe -v error -show_entries format=duration -of csv=p=0 " <>
+    shell_quote(path) <> " 2>&1"
+  let out = os_cmd(charlist.from_string(cmd)) |> charlist.to_string |> string.trim
+  case float.parse(out) {
+    Ok(d) -> Ok(d)
+    Error(_) -> Error("ffprobe failed: " <> out)
+  }
+}
+
 fn extract_id(path: String) -> String {
   let base = filename_from_path(path)
   case string.split(base, ".") {
     [id, _] -> id
     _ -> base
   }
+}
+
+/// Clamp any AlignedTurn's audio_end_s that extends past actual source duration.
+/// This handles cases where whisper's word timestamps report slightly later
+/// end times than the actual MP3 contains.
+///
+/// GUARANTEE: always returns exactly the same number of turns as input.
+/// Never drops a turn — if clamping would zero-duration it, we expand the
+/// end by min_turn_gap instead. This preserves the hard constraint
+/// transcript_turn_count == aligned_turn_count.
+const min_turn_gap: Float = 0.1
+
+fn clamp_aligned_to_duration(
+  turns: List(aligner.AlignedTurn),
+  duration: Float,
+) -> List(aligner.AlignedTurn) {
+  list.fold(turns, [], fn(acc, t) {
+    let clamped_start = case t.audio_start_s >. duration {
+      True -> duration
+      False -> t.audio_start_s
+    }
+    let clamped_end = case t.audio_end_s >. duration {
+      True -> duration
+      False -> t.audio_end_s
+    }
+    // If clamping would give zero/negative duration, expand end by min_turn_gap.
+    // This preserves count — we NEVER drop a turn.
+    let clamped_end = case clamped_end <=. clamped_start +. 0.001 {
+      True -> float.min(clamped_start +. min_turn_gap, duration)
+      False -> clamped_end
+    }
+    [
+      aligner.AlignedTurn(
+        index: t.index,
+        role: t.role,
+        text: t.text,
+        word_count: t.word_count,
+        audio_start_s: clamped_start,
+        audio_end_s: clamped_end,
+        confidence: t.confidence,
+      ),
+      ..acc
+    ]
+  })
+  |> list.reverse
 }
 
 fn filename_from_path(path: String) -> String {
@@ -160,12 +222,53 @@ fn filename_from_path(path: String) -> String {
 fn print_aligned_turn(t: aligner.AlignedTurn) -> Nil {
   let dur = t.audio_end_s -. t.audio_start_s
   let preview = string.slice(t.text, 0, 40)
+  let conf = confidence_label(t.confidence)
   io.println(
     "    [" <> int.to_string(t.index) <> "] " <> dialogue_types.role_letter(t.role) <> " " <>
     float.to_string(t.audio_start_s) <> "s–" <>
     float.to_string(t.audio_end_s) <> "s (" <>
-    float.to_string(dur) <> "s)  " <> preview,
+    float.to_string(dur) <> "s) [" <> conf <> "]  " <> preview,
   )
+}
+
+fn confidence_label(c: trigram.Confidence) -> String {
+  case c {
+    trigram.Exact -> "EXACT"
+    trigram.Fuzzy -> "FUZZY"
+    trigram.Fallback -> "FALLBACK"
+  }
+}
+
+fn print_confidence_summary(aligned: List(aligner.AlignedTurn)) -> Nil {
+  let counts = list.fold(aligned, #(0, 0, 0), fn(acc, t) {
+    let #(exact, fuzzy, fallback) = acc
+    case t.confidence {
+      trigram.Exact -> #(exact + 1, fuzzy, fallback)
+      trigram.Fuzzy -> #(exact, fuzzy + 1, fallback)
+      trigram.Fallback -> #(exact, fuzzy, fallback + 1)
+    }
+  })
+  let #(exact, fuzzy, fallback) = counts
+  let total = exact + fuzzy + fallback
+  io.println("")
+  io.println("  Confidence summary:")
+  io.println("    Exact:    " <> int.to_string(exact) <> "/" <> int.to_string(total))
+  io.println("    Fuzzy:    " <> int.to_string(fuzzy) <> "/" <> int.to_string(total))
+  io.println("    Fallback: " <> int.to_string(fallback) <> "/" <> int.to_string(total) <> " ← proportional estimate")
+  case fallback > 0 {
+    True -> {
+      // List indices of fallback turns for diagnosis
+      let fallback_indices = list.fold(aligned, [], fn(acc, t) {
+        case t.confidence {
+          trigram.Fallback -> [t.index, ..acc]
+          _ -> acc
+        }
+      })
+      |> list.reverse
+      io.println("    Fallback turn indices: " <> string.join(list.map(fallback_indices, int.to_string), ", "))
+    }
+    False -> Nil
+  }
 }
 
 // ── Error describers ───────────────────────────────────────────────────────

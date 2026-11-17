@@ -11,7 +11,6 @@ import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/charlist
-import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -29,7 +28,7 @@ pub opaque type WhisperModel {
 }
 
 pub type Word {
-  Word(text: String, start: Float, end: Float, probability: Float)
+  Word(text: String, start: Float, end: Float, probability: Float, segment_index: Int)
 }
 
 pub type Segment {
@@ -66,14 +65,14 @@ pub type WhisperOpts {
 @external(erlang, "Elixir.WhisperCpp", "load_model")
 fn whisper_load_model(
   path: String,
-  opts: List(#(atom.Atom, String)),
+  opts: List(#(atom.Atom, dynamic.Dynamic)),
 ) -> dynamic.Dynamic
 
 @external(erlang, "Elixir.WhisperCpp", "transcribe")
 fn whisper_transcribe_nif(
   model_raw: dynamic.Dynamic,
   pcm: #(atom.Atom, BitArray),
-  opts: List(#(atom.Atom, String)),
+  opts: List(#(atom.Atom, dynamic.Dynamic)),
 ) -> dynamic.Dynamic
 
 @external(erlang, "persistent_term", "put")
@@ -124,18 +123,18 @@ pub fn transcribe_pcm(
   decode_transcription(nif_result)
 }
 
-fn build_nif_opts(opts: WhisperOpts) -> List(#(atom.Atom, String)) {
+fn build_nif_opts(opts: WhisperOpts) -> List(#(atom.Atom, dynamic.Dynamic)) {
   let base = [
-    #(atom.create("language"), opts.language),
-    #(atom.create("beam_size"), int.to_string(opts.beam_size)),
-    #(atom.create("n_threads"), int.to_string(opts.n_threads)),
+    #(atom.create("language"), dynamic.string(opts.language)),
+    #(atom.create("beam_size"), dynamic.int(opts.beam_size)),
+    #(atom.create("n_threads"), dynamic.int(opts.n_threads)),
   ]
   let with_ts = case opts.word_timestamps {
-    True -> [#(atom.create("word_timestamps"), "true"), ..base]
+    True -> [#(atom.create("word_timestamps"), dynamic.bool(True)), ..base]
     False -> base
   }
   case opts.initial_prompt {
-    Some(prompt) -> [#(atom.create("initial_prompt"), prompt), ..with_ts]
+    Some(prompt) -> [#(atom.create("initial_prompt"), dynamic.string(prompt)), ..with_ts]
     None -> with_ts
   }
 }
@@ -154,7 +153,9 @@ fn get_cached_model() -> Result(WhisperModel, WhisperError) {
 
 fn load_and_cache_model() -> Result(WhisperModel, WhisperError) {
   ensure_whisper_started()
-  let raw = whisper_load_model(default_model_path(), [])
+  // Force CPU backend — Metal crashes in this environment.
+  let load_opts = [#(atom.create("use_gpu"), dynamic.bool(False))]
+  let raw = whisper_load_model(default_model_path(), load_opts)
   case decode.run(raw, decode.at([0], atom.decoder())) {
     Ok(tag) -> {
       case atom.to_string(tag) {
@@ -214,16 +215,31 @@ fn decode_transcription_map(map: dynamic.Dynamic) -> Result(Transcription, Whisp
 
 fn decode_segments(raw: dynamic.Dynamic) -> Result(List(Segment), WhisperError) {
   case decode.run(raw, decode.list(decode.dynamic)) {
-    Ok(seg_list) -> list.try_map(seg_list, decode_segment)
+    Ok(seg_list) -> {
+      let indices = build_index_list(list.length(seg_list))
+      let indexed = list.zip(seg_list, indices)
+      list.try_map(indexed, fn(pair) { decode_segment(pair.0, pair.1) })
+    }
     Error(_) -> Error(DecodeFailed("could not decode segments list"))
   }
 }
 
-fn decode_segment(raw: dynamic.Dynamic) -> Result(Segment, WhisperError) {
+/// Build [0, 1, 2, ..., n-1] using BEAM lists:seq (no stdlib list.range).
+fn build_index_list(n: Int) -> List(Int) {
+  case n <= 0 {
+    True -> []
+    False -> lists_seq(0, n - 1)
+  }
+}
+
+@external(erlang, "lists", "seq")
+fn lists_seq(from: Int, to: Int) -> List(Int)
+
+fn decode_segment(raw: dynamic.Dynamic, seg_idx: Int) -> Result(Segment, WhisperError) {
   let text_s = decode.run(maps_get(atom.create("text"), raw, dynamic.nil()), decode.string)
   let start_f = decode.run(maps_get(atom.create("start"), raw, dynamic.nil()), decode.float)
   let end_f = decode.run(maps_get(atom.create("end"), raw, dynamic.nil()), decode.float)
-  let words = decode_words(maps_get(atom.create("words"), raw, dynamic.nil()))
+  let words = decode_words(maps_get(atom.create("words"), raw, dynamic.nil()), seg_idx)
 
   case text_s, start_f, end_f, words {
     Ok(t), Ok(s), Ok(e), Ok(w) -> Ok(Segment(text: t, start: s, end: e, words: w))
@@ -231,24 +247,24 @@ fn decode_segment(raw: dynamic.Dynamic) -> Result(Segment, WhisperError) {
   }
 }
 
-fn decode_words(raw: dynamic.Dynamic) -> Result(List(Word), WhisperError) {
+fn decode_words(raw: dynamic.Dynamic, seg_idx: Int) -> Result(List(Word), WhisperError) {
   case raw == dynamic.nil() {
     True -> Ok([])
     False -> case decode.run(raw, decode.list(decode.dynamic)) {
-      Ok(wlist) -> list.try_map(wlist, decode_word)
+      Ok(wlist) -> list.try_map(wlist, fn(r) { decode_word(r, seg_idx) })
       Error(_) -> Error(DecodeFailed("could not decode words list"))
     }
   }
 }
 
-fn decode_word(raw: dynamic.Dynamic) -> Result(Word, WhisperError) {
+fn decode_word(raw: dynamic.Dynamic, seg_idx: Int) -> Result(Word, WhisperError) {
   let text_r = decode.run(maps_get(atom.create("text"), raw, dynamic.nil()), decode.string)
   let start_r = decode.run(maps_get(atom.create("start"), raw, dynamic.nil()), decode.float)
   let end_r = decode.run(maps_get(atom.create("end"), raw, dynamic.nil()), decode.float)
   let prob_r = decode.run(maps_get(atom.create("probability"), raw, dynamic.nil()), decode.float)
 
   case text_r, start_r, end_r, prob_r {
-    Ok(t), Ok(s), Ok(e), Ok(p) -> Ok(Word(text: t, start: s, end: e, probability: p))
+    Ok(t), Ok(s), Ok(e), Ok(p) -> Ok(Word(text: t, start: s, end: e, probability: p, segment_index: seg_idx))
     _, _, _, _ -> Error(DecodeFailed("could not decode word"))
   }
 }

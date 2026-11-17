@@ -1,29 +1,43 @@
-//// Alignment algorithm — map transcript turn boundaries to audio timestamps.
+//// Alignment algorithm (trigram anchor matching) — map transcript turn
+//// boundaries to audio timestamps.
 ////
-//// Strategy: whisper.cpp word timestamps give absolute time for every word
-//// in the audio. The transcript parser gives words per turn. We distribute
-//// expected turn boundaries proportionally across the audio timeline, then
-//// snap each boundary to the LARGEST silence gap within a ±3s window.
+//// Pipeline:
+////   Turn list + whisper Word list
+////     → anchor_extractor.extract_anchors → BoundaryAnchor list
+////     → trigram_alignment.align_boundaries → BoundaryResult list
+////     → extract boundary_s, Fallback → proportional estimate
+////     → enforce_monotonic + append [0.0, duration] edges
+////     → pair consecutive boundaries → AlignedTurn list
 ////
-//// This is robust to whisper hallucinations (ggml-tiny/base mishears words)
-//// because we DON'T try to match transcript text to whisper text — we only
-//// use the TIMESTAMPS from whisper's AUDIO analysis, and the word-COUNT
-//// distribution from the transcript.
+//// Key design: each interior boundary timestamp comes from trigram
+//// matching (or proportional Fallback). We only enforce NON-DECREASING
+//// order (no crossing) — NO artificial minimum gaps. Whisper tiny model
+//// has coarse time resolution so rapid-fire exchanges may land at the
+//// same float timestamp. Those boundaries stay right where they are
+//// — no staircase artifacts from cascaded 0.1s pushes.
+////
+//// See anchor_extractor.gleam and trigram_alignment.gleam for details.
 
-import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, Some, None}
 import gleam/string
 import alignment/dialogue_types.{type Turn, type Role}
-import alignment/whisper_driver.{type Word, type Segment}
-
-/// A single gap between consecutive whisper words where silence > threshold.
-pub type SilenceGap {
-  SilenceGap(start: Float, end: Float, duration: Float)
+import alignment/whisper_driver.{type Word, type Segment, Word}
+import alignment/anchor_extractor.{
+  type BoundaryAnchor,
+  BoundaryAnchor,
+  extract_anchors,
+}
+import alignment/trigram_alignment.{
+  type Confidence,
+  Fallback,
+  Exact,
+  align_boundaries,
 }
 
-/// An aligned turn with absolute audio start/end times (seconds).
+// ── Public types (stable, used by splitter/manifest/CLI) ────────────────────
+
 pub type AlignedTurn {
   AlignedTurn(
     index: Int,
@@ -32,6 +46,9 @@ pub type AlignedTurn {
     word_count: Int,
     audio_start_s: Float,
     audio_end_s: Float,
+    /// Boundary match confidence: Exact | Fuzzy | Fallback
+    /// Low-confidence (Fallback) boundaries are rough proportional estimates.
+    confidence: Confidence,
   )
 }
 
@@ -41,198 +58,193 @@ pub type AlignError {
   ComputationFailed(String)
 }
 
-/// Align transcript turns to whisper word timestamps.
+// ── Public API ──────────────────────────────────────────────────────────────
+
 pub fn align_turns(
   turns: List(Turn),
   words: List(Word),
   audio_duration_s: Float,
 ) -> Result(List(AlignedTurn), AlignError) {
-  let no_turns = turns == []
-  let no_words = words == []
-  case no_turns, no_words {
+  case turns == [], words == [] {
     True, _ -> Error(EmptyTranscript)
     _, True -> Error(NoWordTimestamps)
-    False, False -> {
-      let silence_gaps = find_silence_gaps(words, 0.3)
-      let turn_word_counts = list.map(turns, fn(t) { count_words(t.text) })
-      let total_transcript_words = list.fold(turn_word_counts, 0, fn(a, b) { a + b })
-      let total_whisper_words = list.length(words)
-      let first_word_start = case list.first(words) {
-        Ok(w) -> w.start
-        Error(_) -> 0.0
-      }
-      let last_word_end = case list.last(words) {
-        Ok(w) -> w.end
-        Error(_) -> audio_duration_s
-      }
-      let effective_duration = last_word_end -. first_word_start
+    False, False -> do_align(turns, words, audio_duration_s)
+  }
+}
 
-      let expected_boundaries = build_expected_boundaries(
-        turn_word_counts,
-        total_transcript_words,
-        total_whisper_words,
-        first_word_start,
-        effective_duration,
-      )
+// ── Pipeline ────────────────────────────────────────────────────────────────
 
-      let snapped = list.map(expected_boundaries, fn(exp) {
-        snap_to_silence(exp, silence_gaps, 3.0)
-      })
+fn do_align(
+  turns: List(Turn),
+  words: List(Word),
+  audio_duration_s: Float,
+) -> Result(List(AlignedTurn), AlignError) {
+  let whisper_total = list.length(words)
+  let words = list.filter(words, fn(w) { w.start <=. audio_duration_s })
 
-      let final_boundaries = finalize_boundaries(snapped, audio_duration_s)
+  let anchors = extract_anchors(turns, whisper_total)
+  let results = align_boundaries(anchors, words)
 
-      build_aligned_turns(turns, final_boundaries)
+  // Each interior boundary: observed trigram timestamp + confidence.
+  // Fallback boundaries (trigram failed) use proportional estimate.
+  let boundary_data = list.index_map(results, fn(r, i) {
+    let anchor = nth_anchor(anchors, i)
+    let boundary = case r.confidence {
+      Fallback -> estimate_from_anchor(anchor, words, audio_duration_s)
+      _ -> r.boundary_s
     }
-  }
-}
-
-// ── Step 1: Find silence gaps ────────────────────────────────────────────────
-
-pub fn find_silence_gaps(words: List(Word), threshold_s: Float) -> List(SilenceGap) {
-  case words {
-    [] -> []
-    [_] -> []
-    _ -> {
-      let pairs = pair_consecutive(words, [])
-      let filtered = list.filter(pairs, fn(pair) {
-        let #(w1, w2) = pair
-        let gap = w2.start -. w1.end
-        gap >. threshold_s
-      })
-      list.map(filtered, fn(pair) {
-        let #(w1, w2) = pair
-        let gap_start = w1.end
-        let gap_end = w2.start
-        SilenceGap(
-          start: gap_start,
-          end: gap_end,
-          duration: gap_end -. gap_start,
-        )
-      })
-    }
-  }
-}
-
-fn pair_consecutive(words: List(Word), acc: List(#(Word, Word))) -> List(#(Word, Word)) {
-  case words {
-    [] -> list.reverse(acc)
-    [_] -> list.reverse(acc)
-    [a, b, ..rest] -> pair_consecutive([b, ..rest], [#(a, b), ..acc])
-  }
-}
-
-// ── Step 2: Build expected boundary times ───────────────────────────────────
-
-fn build_expected_boundaries(
-  turn_word_counts: List(Int),
-  total_transcript_words: Int,
-  total_whisper_words: Int,
-  first_word_start: Float,
-  effective_duration: Float,
-) -> List(Float) {
-  let whisper_ratio = case total_transcript_words > 0 {
-    True -> int.to_float(total_whisper_words) /. int.to_float(total_transcript_words)
-    False -> 1.0
-  }
-  let cumulative = scan_sum(turn_word_counts, 0, [])
-  // Drop the last cumulative value (that's total = audio end)
-  let drop_last = case cumulative {
-    [] -> []
-    [_] -> []
-    _ -> list.reverse(cumulative) |> list.drop(1) |> list.reverse
-  }
-  list.map(drop_last, fn(cum) {
-    let progress = int.to_float(cum) /. int.to_float(total_transcript_words)
-    first_word_start +. progress *. whisper_ratio *. effective_duration
+    #(boundary, r.confidence)
   })
+
+  let boundaries = list.map(boundary_data, fn(p) { p.0 })
+  let boundary_confidences = list.map(boundary_data, fn(p) { p.1 })
+
+  // Append edges, enforce non-decreasing order
+  let full = [0.0, ..list.append(boundaries, [audio_duration_s])]
+  let final_boundaries = enforce_monotonic(full)
+
+  build_aligned_turns(turns, final_boundaries, boundary_confidences)
 }
 
-/// Running sum: [2, 3, 4] with start=0 → [2, 5, 9]
-fn scan_sum(values: List(Int), current: Int, acc: List(Int)) -> List(Int) {
+// ── Fallback estimation ────────────────────────────────────────────────────
+
+fn nth_anchor(anchors: List(BoundaryAnchor), idx: Int) -> BoundaryAnchor {
+  case list.drop(anchors, idx) {
+    [h, ..] -> h
+    _ -> BoundaryAnchor(
+      turn_before_index: 0,
+      turn_after_index: 0,
+      last_tokens: [],
+      first_tokens: [],
+      expected_whisper_index: 0.0,
+    )
+  }
+}
+
+/// Convert anchor.expected_whisper_index → absolute audio time by
+/// interpolating between whisper word timestamps.
+fn estimate_from_anchor(
+  anchor: BoundaryAnchor,
+  words: List(Word),
+  audio_duration_s: Float,
+) -> Float {
+  let pos = anchor.expected_whisper_index
+  let total = list.length(words)
+  case total {
+    0 -> 0.0
+    1 -> case list.first(words) {
+      Ok(w) -> w.end
+      Error(_) -> 0.0
+    }
+    _ -> {
+      let clamped = clamp_float(pos, 0.0, int.to_float(total - 1))
+      let lo_idx = trunc_float(clamped)
+      let frac = clamped -. int.to_float(lo_idx)
+      case nth_word(words, lo_idx), nth_word(words, lo_idx + 1) {
+        Some(Word(end: e_lo, ..)), Some(Word(start: s_hi, ..)) -> {
+          let t = e_lo +. { s_hi -. e_lo } *. frac
+          clamp_float(t, 0.0, audio_duration_s)
+        }
+        Some(w_word), None -> clamp_float(w_word.end, 0.0, audio_duration_s)
+        None, Some(w_word) -> clamp_float(w_word.start, 0.0, audio_duration_s)
+        _, _ -> 0.0
+      }
+    }
+  }
+}
+
+fn nth_word(words: List(Word), idx: Int) -> Option(Word) {
+  case list.drop(words, idx) {
+    [] -> None
+    [h, ..] -> Some(h)
+  }
+}
+
+fn clamp_float(v: Float, lo: Float, hi: Float) -> Float {
+  case v <. lo {
+    True -> lo
+    False -> case v >. hi {
+      True -> hi
+      False -> v
+    }
+  }
+}
+
+/// BEAM erlang:trunc — float → Int truncation (Gleam 1.19 int.floor missing).
+@external(erlang, "erlang", "trunc")
+fn trunc_float(f: Float) -> Int
+
+// ── Monotonic enforcement ──────────────────────────────────────────────────
+
+/// Ensure boundaries are non-decreasing (no crossing).
+/// This is a safety net — trigram_alignment should already return
+/// monotonically increasing boundaries in transcript order.
+///
+/// IMPORTANT: We use NO minimum gap. Multiple boundaries may legitimately
+/// land at the same whisper timestamp (whisper tiny model has coarse
+/// time resolution for rapid-fire exchanges). Those boundaries stay
+/// exactly where they are — no cascaded staircase artifacts.
+fn enforce_monotonic(values: List(Float)) -> List(Float) {
   case values {
-    [] -> list.reverse(acc)
-    [v, ..rest] -> {
-      let next = current + v
-      scan_sum(rest, next, [next, ..acc])
-    }
+    [] -> []
+    [only] -> [only]
+    [first, ..rest] -> list.reverse(enforce_tail(rest, first, [first]))
   }
 }
 
-// ── Step 3: Snap to silence ──────────────────────────────────────────────────
+/// Minimum gap between consecutive boundaries.
+/// 
+/// Why non-zero: whisper tiny model has coarse time resolution —
+/// consecutive trigram anchors can land on IDENTICAL float timestamps
+/// (whisper reports all words in a rapid-fire exchange at the same time).
+/// Without a gap, pair_consecutive_floats produces zero-duration pairs
+/// (e.g., start=end=79.25s for turns that should be distinct).
+///
+/// Why 0.01s: ffmpeg handles ≥5ms reliably. 10ms is tiny enough that
+/// cascaded spread for 7 rapid questions = 70ms (realistic for spoken
+/// dialogue) but large enough to eliminate floating-point duplicates.
+///
+/// Why not 0.1s: that creates a visible staircase artifact — 7 quick
+/// exchanges spread over 0.7s of artificial audio.
+const min_boundary_gap: Float = 0.01
 
-fn snap_to_silence(expected: Float, gaps: List(SilenceGap), window_s: Float) -> Float {
-  let candidates = list.filter(gaps, fn(g) {
-    let mid = g.start +. g.end
-    let center = mid /. 2.0
-    float.absolute_value(center -. expected) <=. window_s
-  })
-  case candidates {
-    [] -> expected
-    _ -> {
-      let init: Option(SilenceGap) = None
-      let best = list.fold(candidates, init, fn(acc, g) {
-        case acc {
-          None -> Some(g)
-          Some(current) ->
-            case g.duration >. current.duration {
-              True -> Some(g)
-              False -> Some(current)
-            }
-        }
-      })
-      case best {
-        None -> expected
-        Some(g) -> {
-          let mid = g.start +. g.end
-          mid /. 2.0
-        }
-      }
-    }
-  }
-}
-
-// ── Step 4: Finalize boundaries ─────────────────────────────────────────────
-
-fn finalize_boundaries(snapped: List(Float), audio_duration_s: Float) -> List(Float) {
-  let with_front = [0.0, ..snapped]
-  let with_edges = list.append(with_front, [audio_duration_s])
-  // First element (0.0 = audio start) is fixed — don't re-enforce it
-  case with_edges {
-    [first, ..rest] -> list.reverse(enforce_monotonic(rest, first, [first]))
-    _ -> list.reverse(enforce_monotonic(with_edges, 0.0, []))
-  }
-}
-
-fn enforce_monotonic(
-  values: List(Float),
-  last: Float,
-  acc: List(Float),
-) -> List(Float) {
+fn enforce_tail(values: List(Float), last: Float, acc: List(Float)) -> List(Float) {
   case values {
     [] -> acc
     [v, ..rest] -> {
-      let min_gap = 0.05
-      let adjusted = case v >. last +. min_gap {
+      let adjusted = case v >. last +. min_boundary_gap {
         True -> v
-        False -> last +. min_gap
+        False -> last +. min_boundary_gap
       }
-      enforce_monotonic(rest, adjusted, [adjusted, ..acc])
+      enforce_tail(rest, adjusted, [adjusted, ..acc])
     }
   }
 }
 
-// ── Step 5: Build aligned turns ──────────────────────────────────────────────
+// ── Build AlignedTurns ──────────────────────────────────────────────────────
 
 fn build_aligned_turns(
   turns: List(Turn),
   boundaries: List(Float),
+  boundary_confs: List(Confidence),
 ) -> Result(List(AlignedTurn), AlignError) {
   let pairs = pair_consecutive_floats(boundaries, [])
-  let turn_count = list.length(turns)
-  let pair_count = list.length(pairs)
-  case turn_count == pair_count {
+  case list.length(turns) == list.length(pairs) {
     True -> {
-      list.map2(turns, pairs, fn(turn, pair) {
+      // Turn[i] confidence = boundary[i-1] confidence (start boundary)
+      // Turn[0] always starts at 0.0 → Exact
+      let confs = turn_confidences(boundary_confs, list.length(turns))
+      // Gleam 1.19 stdlib has no list.map3 — use indexed map on turns,
+      // then look up pairs[i] and confs[i] by index.
+      Ok(list.index_map(turns, fn(turn, i) {
+        let pair = case list.drop(pairs, i) {
+          [p, ..] -> p
+          _ -> #(0.0, 0.0)
+        }
+        let conf = case list.drop(confs, i) {
+          [c, ..] -> c
+          _ -> Fallback
+        }
         let #(start, end) = pair
         AlignedTurn(
           index: turn.index,
@@ -241,14 +253,28 @@ fn build_aligned_turns(
           word_count: count_words(turn.text),
           audio_start_s: start,
           audio_end_s: end,
+          confidence: conf,
         )
-      })
-      |> Ok
+      }))
     }
     False -> Error(ComputationFailed(
-      "turn count (" <> int.to_string(turn_count) <>
-      ") != boundary pairs (" <> int.to_string(pair_count) <> ")",
+      "turn count (" <> int.to_string(list.length(turns)) <>
+      ") != boundary pairs (" <> int.to_string(list.length(pairs)) <> ")",
     ))
+  }
+}
+
+/// boundary_confs has N-1 entries for N turns (interior boundaries only).
+/// Turn[0] confidence = Exact (start=0.0 is always right).
+/// Turn[i] confidence = boundary_confs[i-1] (the boundary between turn[i-1] and turn[i]).
+fn turn_confidences(boundary_confs: List(Confidence), turn_count: Int) -> List(Confidence) {
+  case turn_count {
+    0 -> []
+    1 -> [Exact]
+    _ -> {
+      // Prepend Exact for turn[0]
+      [Exact, ..boundary_confs]
+    }
   }
 }
 
@@ -260,7 +286,7 @@ fn pair_consecutive_floats(values: List(Float), acc: List(#(Float, Float))) -> L
   }
 }
 
-// ── Utilities ───────────────────────────────────────────────────────────────
+// ── Public utilities ────────────────────────────────────────────────────────
 
 pub fn count_words(text: String) -> Int {
   text
