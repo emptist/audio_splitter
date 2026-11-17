@@ -2,10 +2,10 @@
 
 Offline Gleam tool that takes a long dialogue mp3 + its transcript, and splits
 it into per-turn mp3 clips with a JSON manifest. Uses whisper_cpp word
-timestamps + silence-gap alignment — accurate even when whisper hallucinates
-text (timestamps come from audio, not text quality).
+timestamps + **trigram anchor alignment** — accurate even when whisper
+hallucinates text (timestamps come from audio, not text quality).
 
-Generic: works with any D:/P: speaker-prefix dialogue transcript format.
+Generic: works with any `D:`/`P:` speaker-prefix dialogue transcript format.
 No dependency on speak_engl or any other domain.
 
 ## Requirements
@@ -58,38 +58,61 @@ manifest.json:
 {
   "dialogue_id": "GAS0001",
   "audio_file": "GAS0001.mp3",
-  "duration_s": 565.2,
+  "duration_s": 570.8,
   "turn_count": 75,
   "turns": [
     {
       "index": 0,
       "role": "D",
       "text": "What brings you in today?",
-      "word_count": 7,
-      "audio_start_s": 0.42,
-      "audio_end_s": 3.15,
-      "duration_s": 2.73,
+      "word_count": 5,
+      "audio_start_s": 0.0,
+      "audio_end_s": 4.8,
+      "duration_s": 4.8,
       "audio_path": "turn_0000.mp3"
     }
   ]
 }
 ```
 
-## How alignment works
+## How alignment works (trigram anchor matching)
+
+Each boundary between transcript turns is a 3-word anchor from the tail of
+the previous turn and a 3-word anchor from the head of the next turn. We
+combine them into a 6-word search target and slide it through whisper's
+timestamped word stream, scoring each position with exact/prefix/fuzzy
+matching. This gives a precise boundary timestamp even when whisper
+mishears words — timestamps come from audio analysis, not text quality.
+
+See [docs/ALIGNMENT_ALGORITHM.md](docs/ALIGNMENT_ALGORITHM.md) for details.
+
+## Algorithm pipeline
 
 1. **ffmpeg decode** — mp3 → f32le PCM (16kHz mono)
 2. **whisper_cpp transcribe** — with `word_timestamps: true`
-3. **transcript_parser** — parse D:/P: format, merge continuation lines
-4. **aligner** — find silence gaps >300ms; distribute expected boundaries
-   proportionally to cumulative word position; snap each boundary to the
-   largest silence gap within ±3s window; enforce monotonic order
-5. **ffmpeg split** — `-ss start -to end -c copy` per turn (lossless, instant)
-6. **manifest.json** — written alongside the clips
+3. **transcript_parser** — parse `D:`/`P:` format, merge continuation lines
+4. **anchor_extractor** — extract 3-word boundary anchors from each turn pair
+5. **trigram_alignment** — slide combined 6-word anchors through whisper's
+   word stream in a ±5% window, score each position (exact / prefix / fuzzy
+   match), return timestamp + Confidence
+6. **enforce_monotonic** — append 0.0 and audio_duration edges, enforce
+   non-decreasing order with 0.01s minimum gap (handles whisper coarse
+   time resolution for rapid-fire exchanges)
+7. **clamp_aligned_to_duration** — ensure no turn extends past audio end;
+   **guarantees transcript turn count == split count** (never drops turns)
+8. **ffmpeg split** — `-ss start -t duration` per turn (lossless, instant)
+9. **manifest.json** — written alongside the clips
 
-Why silence-gap matching works when whisper hallucinates text: whisper's
-word timestamps come from audio analysis, not text decoding quality. If
-whisper says "nagging" but the transcript says "nauseated", the timestamps
-for that position are still correct.
+## Confidence levels
+
+| Level | Meaning | Reliability |
+|-------|---------|-------------|
+| Exact | Turn[0] only (start=0.0 is always known) | 100% |
+| Fuzzy | Trigram match scored ≥1.5 with exact/prefix/fuzzy word matching | ~95% |
+| Fallback | Trigram failed — proportional interpolation via whisper_index ratio | ~80% |
+
+**Real results**: GAS0001 (75 turns) — 1 Exact, 70 Fuzzy, 4 Fallback.
+CAR0001 (121 turns) — 1 Exact, 118 Fuzzy, 2 Fallback.
 
 ## Architecture
 
@@ -98,12 +121,15 @@ src/
 ├── alignment.gleam              # CLI entry + flat pipeline via `use`
 └── alignment/
     ├── dialogue_types.gleam     # Generic Turn/Role
-    ├── transcript_parser.gleam # D:/P: format parser
+    ├── transcript_parser.gleam  # D:/P: format parser
     ├── shell.gleam              # @external erlang:os:cmd (single source of truth)
     ├── file_io.gleam            # @external erlang:file:* (single source of truth)
     ├── whisper_driver.gleam     # Opaque WhisperModel, word-timestamp decode
-    ├── aligner.gleam            # Pure math — silence-gap + proportional match
-    ├── splitter.gleam           # ffmpeg -c copy lossless extraction
+    ├── word_matcher.gleam       # Tokenize + exact/prefix/fuzzy per-word matching
+    ├── anchor_extractor.gleam   # Extract 3-word boundary anchors + proportional expected whisper_index
+    ├── trigram_alignment.gleam  # Slide 6-word anchor through whisper stream, score positions
+    ├── aligner.gleam            # Pipeline orchestrator — extract → match → enforce monotonic
+    ├── splitter.gleam           # ffmpeg extraction
     └── manifest.gleam           # JSON manifest writer
 ```
 
@@ -123,6 +149,8 @@ gleam build                          # compile (zero warnings expected)
 gleam run -m alignment <mp3> <txt> <out>   # run the tool
 gleam test                           # run tests
 gleam build --warnings-as-errors     # CI gate
+gleam export hex-tarball             # prepare hex package
+gleam publish                        # publish to hex.pm
 ```
 
 ## Dependencies
@@ -130,7 +158,19 @@ gleam build --warnings-as-errors     # CI gate
 | Package | Purpose |
 |---------|---------|
 | `gleam_stdlib` | Standard library |
-| `gleam_erlang` | Erlang interop (atom, charlist) |
+| `gleam_erlang` | Erlang interop (atom, charlist, lists:seq) |
 | `gleam_json` | JSON encoding |
+| `gleam_regexp` | regex-based tokenization + normalization (by lpil) |
+| `edit_distance` | Pure-Gleam levenshtein for fuzzy matching (v3.0.1) |
 | `whisper_cpp` | whisper.cpp speech-to-text NIF (>= 0.5.0) |
 | `gleeunit` | Test framework (dev only) |
+
+## Version history
+
+- **v1.1.0** — Replaced old proportional + silence-gap algorithm with trigram
+  anchor matching. Each boundary verified by sliding 3-word tail + 3-word
+  head anchor through whisper's word stream. Guaranteed transcript turn count
+  == split count. Added `word_matcher`, `anchor_extractor`, `trigram_alignment`
+  modules. Added `edit_distance` + `gleam_regexp` deps.
+- **v1.0.1** — Initial release: ffmpeg decode, whisper transcribe,
+  proportional + silence-gap alignment, per-turn mp3 split, JSON manifest.
