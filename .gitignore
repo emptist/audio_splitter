@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+*.beam
+*.beams
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temp test output
+test_out/
+tmp/
+*.pcm
+
+# Whisper model (never in repo)
+*.bin
+
+# Dependency caches
+.download/

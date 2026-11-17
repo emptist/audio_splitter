@@ -1,0 +1,97 @@
+//// JSON manifest writer — one manifest per dialogue directory.
+////
+//// Output format (per dialogue):
+////   {
+////     "dialogue_id": "GAS0001",
+////     "audio_file": "GAS0001.mp3",
+////     "transcript_file": "GAS0001.txt",
+////     "duration_s": 565.2,
+////     "turn_count": 75,
+////     "turns": [{ "index", "role", "text", "audio_path", "audio_start_s", "audio_end_s", ... }]
+////   }
+////
+//// Returns Result — file write failure is not silently ignored.
+
+import gleam/int
+import gleam/json
+import gleam/list
+import gleam/string
+import alignment/dialogue_types as dialogue_types
+import alignment/aligner.{type AlignedTurn}
+import alignment/file_io
+
+/// Write manifest.json to output_dir. Returns the path on success.
+pub fn write_manifest(
+  dialogue_id: String,
+  audio_file: String,
+  transcript_file: String,
+  duration_s: Float,
+  turns: List(AlignedTurn),
+  output_dir: String,
+) -> Result(String, file_io.FileError) {
+  let manifest = build_manifest_json(
+    dialogue_id,
+    audio_file,
+    transcript_file,
+    duration_s,
+    turns,
+  )
+  let path = output_dir <> "/manifest.json"
+  case file_io.write_text(path, manifest) {
+    Ok(_) -> Ok(path)
+    Error(e) -> Error(e)
+  }
+}
+
+fn build_manifest_json(
+  dialogue_id: String,
+  audio_file: String,
+  transcript_file: String,
+  duration_s: Float,
+  turns: List(AlignedTurn),
+) -> String {
+  let turn_objects = list.map(turns, fn(t) {
+    json.object([
+      #("index", json.int(t.index)),
+      #("role", json.string(role_letter(t.role))),
+      #("text", json.string(t.text)),
+      #("word_count", json.int(t.word_count)),
+      #("audio_start_s", json.float(t.audio_start_s)),
+      #("audio_end_s", json.float(t.audio_end_s)),
+      #("duration_s", json.float(t.audio_end_s -. t.audio_start_s)),
+      #("audio_path", json.string(turn_filename(t.index))),
+    ])
+  })
+
+  json.to_string(json.object([
+    #("dialogue_id", json.string(dialogue_id)),
+    #("audio_file", json.string(audio_file)),
+    #("transcript_file", json.string(transcript_file)),
+    #("duration_s", json.float(duration_s)),
+    #("turn_count", json.int(list.length(turns))),
+    #("turns", json.array(turn_objects, of: fn(x) { x })),
+  ]))
+}
+
+fn role_letter(role: dialogue_types.Role) -> String {
+  case role {
+    dialogue_types.Doctor -> "D"
+    dialogue_types.Patient -> "P"
+  }
+}
+
+fn turn_filename(index: Int) -> String {
+  let padded = zero_pad(index, 4)
+  "turn_" <> padded <> ".mp3"
+}
+
+fn zero_pad(n: Int, width: Int) -> String {
+  let s = int.to_string(n)
+  case width <= string.length(s) {
+    True -> s
+    False -> {
+      let needed = width - string.length(s)
+      string.repeat("0", needed) <> s
+    }
+  }
+}
