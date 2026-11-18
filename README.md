@@ -30,7 +30,22 @@ gleam run -m alignment /path/to/dialogue.mp3 /path/to/transcript.txt /path/to/ou
 gleam run -m alignment data/GAS0001.mp3 data/GAS0001.txt out/GAS0001
 ```
 
-### Batch all dialogues
+### Batch all dialogues (single VM)
+
+```sh
+# whisper model loads ONCE and stays cached for ALL dialogues (~5.5h for 272 on CPU)
+gleam run -m batch /path/to/assets_dir
+
+# Expected directory layout:
+#   assets_dir/audio/*.mp3          — input mp3s
+#   assets_dir/transcripts/*.txt    — D:/P: transcripts (UTF-8, UTF-16 LE/BE all supported)
+#   assets_dir/split/<dialogue_id>/ — output (one manifest + per-turn mp3 per dialogue)
+```
+
+The batch runner skips any dialogue that already has a `manifest.json` in its split
+output directory, so it's safe to re-run — it picks up where it left off.
+
+#### Shell loop (fallback — slower, whisper reloads per dialogue)
 
 ```sh
 for mp3 in data/audio/*.mp3; do
@@ -118,7 +133,8 @@ CAR0001 (121 turns) — 1 Exact, 118 Fuzzy, 2 Fallback.
 
 ```
 src/
-├── alignment.gleam              # CLI entry + flat pipeline via `use`
+├── alignment.gleam              # Single-dialogue CLI entry + flat pipeline
+├── batch.gleam                  # Batch CLI — single VM, whisper cached, UTF-16 aware
 └── alignment/
     ├── dialogue_types.gleam     # Generic Turn/Role
     ├── transcript_parser.gleam  # D:/P: format parser
@@ -133,6 +149,22 @@ src/
     └── manifest.gleam           # JSON manifest writer
 ```
 
+## Transcript encoding support
+
+Transcripts are read as raw bytes and decoded via a pure-Gleam BOM-aware decoder in
+`batch.gleam` (one safe BEAM @external: `erlang:binary_to_list`). All common encodings
+work without any hand-written Erlang:
+
+| BOM bytes | Encoding | Decoder action |
+|-----------|----------|----------------|
+| `255, 254` | UTF-16 LE | Pair bytes as `lo + hi * 256` → codepoints |
+| `254, 255` | UTF-16 BE | Pair bytes as `hi * 256 + lo` → codepoints |
+| `239, 187, 191` | UTF-8 BOM | Strip BOM, use `bit_array.to_string` |
+| None | Plain UTF-8 | Use `bit_array.to_string`, fall back to Latin-1 |
+
+The single-dialogue CLI (`alignment.gleam`) uses `file_io.read_text` which assumes
+UTF-8. For UTF-16 transcripts, either pre-convert with `iconv` or use `gleam run -m batch`.
+
 ## Gleam patterns enforced
 
 - **Opaque types** hide FFI handles (`pub opaque type WhisperModel`)
@@ -145,12 +177,13 @@ src/
 ## Build commands
 
 ```sh
-gleam build                          # compile (zero warnings expected)
-gleam run -m alignment <mp3> <txt> <out>   # run the tool
-gleam test                           # run tests
-gleam build --warnings-as-errors     # CI gate
-gleam export hex-tarball             # prepare hex package
-gleam publish                        # publish to hex.pm
+gleam build                                # compile (zero warnings expected)
+gleam run -m alignment <mp3> <txt> <out>   # single dialogue CLI
+gleam run -m batch <assets_dir>            # batch CLI (single VM, whisper cached)
+gleam test                                 # run tests
+gleam build --warnings-as-errors           # CI gate
+gleam export hex-tarball                   # prepare hex package
+gleam publish                              # publish to hex.pm
 ```
 
 ## Dependencies
@@ -167,10 +200,18 @@ gleam publish                        # publish to hex.pm
 
 ## Version history
 
-- **v1.1.0** — Replaced old proportional + silence-gap algorithm with trigram
-  anchor matching. Each boundary verified by sliding 3-word tail + 3-word
-  head anchor through whisper's word stream. Guaranteed transcript turn count
-  == split count. Added `word_matcher`, `anchor_extractor`, `trigram_alignment`
-  modules. Added `edit_distance` + `gleam_regexp` deps.
+- **v1.1.0** — Major upgrade (trigram + batch + UTF-16):
+  - Replaced old proportional + silence-gap algorithm with trigram anchor matching.
+    Each boundary verified by sliding 3-word tail + 3-word head anchor through
+    whisper's word stream. Guaranteed transcript turn count == split count.
+    Added `word_matcher`, `anchor_extractor`, `trigram_alignment` modules.
+  - New `batch.gleam` CLI — processes all dialogues in one BEAM VM. Whisper
+    model loads once and stays cached for the entire batch (~5.5h for 272
+    dialogues on CPU). Skips dialogues that already have `manifest.json`.
+  - Pure-Gleam UTF-16 BOM-aware transcript decoder (UTF-16 LE/BE, UTF-8 BOM,
+    plain UTF-8 all supported). Single safe BEAM @external (`erlang:binary_to_list`).
+    No hand-written Erlang code.
+  - Fixed `file_exists` helper (was always returning `True`).
+  - Added `edit_distance` + `gleam_regexp` deps.
 - **v1.0.1** — Initial release: ffmpeg decode, whisper transcribe,
   proportional + silence-gap alignment, per-turn mp3 split, JSON manifest.

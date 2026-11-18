@@ -15,6 +15,7 @@ build/
 # Temp test output
 test_out/
 tmp/
+.tmp/
 *.pcm
 
 # Whisper model (never in repo)
