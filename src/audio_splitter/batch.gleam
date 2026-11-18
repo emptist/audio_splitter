@@ -1,13 +1,22 @@
-//// Batch runner — processes all MP3s in one BEAM VM.
+//// Batch runner — processes MP3s in one BEAM VM with bounded batches.
 ////
 //// whisper_driver caches the model in persistent_term, so it loads ONCE
-//// and stays resident for ALL dialogues. This saves ~10s model reload per
-//// dialogue compared to spawning `gleam run` N times.
+//// and stays resident for the whole batch — ~10s saved per dialogue vs
+//// spawning `gleam run` N times.
 ////
-//// Usage: gleam run -m audio_splitter/batch <assets_dir>
-////   assets_dir/audio/*.mp3
-////   assets_dir/transcripts/*.txt
-////   assets_dir/split/<dialogue_id>/turn_NNNN.mp3  ← output
+//// Usage:
+////   gleam run -m audio_splitter/batch <assets_dir> [--limit N]
+////   gleam run -m audio_splitter/batch --limit 10 <assets_dir>
+////   gleam run -m audio_splitter/batch <assets_dir> --limit 10
+////
+////   --limit N  Process at most N NEW (not yet done) dialogues, then exit.
+////              Already-done dialogues are skipped and do NOT count.
+////              Omitting --limit processes all remaining (unbounded).
+////
+////   dir layout:
+////     assets_dir/audio/*.mp3
+////     assets_dir/transcripts/*.txt
+////     assets_dir/split/<dialogue_id>/turn_NNNN.mp3  ← output
 
 import gleam/bit_array
 import gleam/erlang/charlist
@@ -74,38 +83,118 @@ type BatchState {
 
 pub fn main() -> Nil {
   let args = init_get_plain_arguments() |> list.map(charlist.to_string)
-  case args {
-    [assets_dir] -> run_batch(assets_dir)
-    _ -> io.println("Usage: gleam run -m audio_splitter/batch <assets_dir>")
+  case parse_args(args) {
+    Ok(#(dir, limit)) -> run_batch(dir, limit)
+    Error(msg) -> io.println(msg)
   }
 }
 
 @external(erlang, "init", "get_plain_arguments")
 fn init_get_plain_arguments() -> List(charlist.Charlist)
 
+/// Parse CLI args: accepts assets_dir anywhere, and --limit N in any order.
+/// Valid forms:
+///   <dir>                           → limit = 0 (unbounded)
+///   <dir> --limit 10                → limit = 10
+///   --limit 10 <dir>                → limit = 10
+///   <dir> --limit=10                → limit = 10
+fn parse_args(args: List(String)) -> Result(#(String, Int), String) {
+  parse_args_loop(args, "", 0)
+}
+
+fn parse_args_loop(args: List(String), dir: String, limit: Int) -> Result(#(String, Int), String) {
+  case args {
+    [] -> case dir {
+      "" -> Error("Usage: gleam run -m audio_splitter/batch <assets_dir> [--limit N]")
+      _ -> Ok(#(dir, limit))
+    }
+    [head, ..tail] -> case head {
+      "--limit" -> case tail {
+        [n_str, ..rest] -> case int.parse(n_str) {
+          Ok(n) -> parse_args_loop(rest, dir, n)
+          Error(_) -> Error("--limit requires an integer, got: " <> n_str)
+        }
+        _ -> Error("--limit requires an argument")
+      }
+      other -> case string.starts_with(other, "--limit=") {
+        True -> case int.parse(string.drop_start(other, 8)) {
+          Ok(n) -> parse_args_loop(tail, dir, n)
+          Error(_) -> Error("--limit= requires an integer")
+        }
+        False -> case string.starts_with(other, "-") {
+          True -> Error("Unknown flag: " <> other)
+          False -> case dir {
+            "" -> parse_args_loop(tail, other, limit)
+            _ -> Error("Unexpected argument: " <> other <> " (assets_dir already given)")
+          }
+        }
+      }
+    }
+  }
+}
+
 // ── Batch runner ─────────────────────────────────────────────────────────
 
-fn run_batch(assets_dir: String) -> Nil {
+fn run_batch(assets_dir: String, limit: Int) -> Nil {
   let audio_dir = assets_dir <> "/audio"
   let txt_dir = assets_dir <> "/transcripts"
   let split_dir = assets_dir <> "/split"
+
+  let all_mp3s = collect_files(audio_dir, "mp3")
+  let all_mp3s = list.sort(all_mp3s, string.compare)
+  let total = list.length(all_mp3s)
+
+  // Pre-scan: find pending (not yet done, has transcript)
+  let pending_ids = list.filter_map(all_mp3s, fn(mp3) {
+    let id = extract_id(mp3)
+    let out_path = split_dir <> "/" <> id
+    let txt_path = txt_dir <> "/" <> id <> ".txt"
+    case !is_already_done(out_path) && file_exists(txt_path) {
+      True -> Ok(id)
+      False -> Error(Nil)
+    }
+  })
+  let pending = list.map(pending_ids, fn(id) {
+    let mp3 = audio_dir <> "/" <> id <> ".mp3"
+    #(mp3, id)
+  })
+
+  let already_done = total - list.length(pending)
+  let remaining = list.length(pending)
+  let to_process = case limit <= 0 {
+    True -> remaining
+    False -> int.min(limit, remaining)
+  }
+  let will_process = list.take(pending, to_process)
+
+  let limit_label = case limit <= 0 {
+    True -> "unbounded"
+    False -> int.to_string(limit)
+  }
 
   io.println("╔══════════════════════════════════════════════════════╗")
   io.println("║  BATCH audio_splitter                                 ║")
   io.println("║  Audio:      " <> audio_dir)
   io.println("║  Transcripts: " <> txt_dir)
   io.println("║  Output:     " <> split_dir)
+  io.println("║  Limit:      " <> limit_label)
   io.println("╚══════════════════════════════════════════════════════╝")
-
-  let all_mp3s = collect_files(audio_dir, "mp3")
-  let all_mp3s = list.sort(all_mp3s, string.compare)
-  let total = list.length(all_mp3s)
-  io.println("Found " <> int.to_string(total) <> " MP3s\n")
+  io.println("Found  " <> int.to_string(total) <> " MP3s total")
+  io.println("  ✅ already done:  " <> int.to_string(already_done))
+  io.println("  🆕 remaining:     " <> int.to_string(remaining))
+  case limit <= 0 {
+    True -> io.println("  → will process ALL " <> int.to_string(remaining) <> " (unbounded, use --limit N to bound)")
+    False -> case to_process == remaining {
+      True -> io.println("  → will process all " <> int.to_string(to_process) <> " (limit covers everything)")
+      False -> io.println("  → will process " <> int.to_string(to_process) <> " of " <> int.to_string(remaining) <> " (limit=" <> int.to_string(limit) <> ")")
+    }
+  }
+  io.println("")
 
   let _ = file_io.make_dir(split_dir)
 
-  let indices = lists_seq(1, total)
-  let with_index = list.zip(all_mp3s, indices)
+  let indices = lists_seq(1, to_process)
+  let with_index = list.zip(will_process, indices)
 
   let initial = BatchState(
     total: total,
@@ -120,29 +209,15 @@ fn run_batch(assets_dir: String) -> Nil {
   )
 
   let final_state = list.fold(with_index, initial, fn(state, pair) {
-    let mp3_path = pair.0
-    let idx = pair.1
-    let dialogue_id = extract_id(mp3_path)
+    let #(#(mp3_path, dialogue_id), idx) = pair
     let txt_path = txt_dir <> "/" <> dialogue_id <> ".txt"
     let out_path = split_dir <> "/" <> dialogue_id
-    let tag = "[" <> int.to_string(idx) <> "/" <> int.to_string(state.total) <> "] " <> dialogue_id
+    let tag = "[" <> int.to_string(idx) <> "/" <> int.to_string(to_process) <> "] " <> dialogue_id
 
-    case file_exists(txt_path) {
-      False -> {
-        io.println(tag <> " → SKIP (no transcript)")
-        BatchState(..state, skip_count: state.skip_count + 1)
-      }
-      True -> case is_already_done(out_path) {
-        True -> {
-          io.println(tag <> " → SKIP (already done)")
-          BatchState(..state, skip_count: state.skip_count + 1)
-        }
-        False -> run_pipeline(state, mp3_path, txt_path, out_path, dialogue_id, tag)
-      }
-    }
+    run_pipeline(state, mp3_path, txt_path, out_path, dialogue_id, tag)
   })
 
-  print_summary(final_state)
+  print_summary(final_state, to_process, remaining, already_done)
 }
 
 fn run_pipeline(
@@ -476,17 +551,30 @@ fn filename_from_path(path: String) -> String {
 
 // ── Summary ───────────────────────────────────────────────────────────────
 
-fn print_summary(state: BatchState) -> Nil {
+fn print_summary(
+  state: BatchState,
+  to_process: Int,
+  remaining: Int,
+  _already_done: Int,
+) -> Nil {
   let total_confs = state.exact_total + state.fuzzy_total + state.fallback_total
   io.println("")
   io.println("═══════════════════════════════════════════════════════")
   io.println("FINAL SUMMARY")
   io.println("═══════════════════════════════════════════════════════")
+  io.println("Processed:  " <> int.to_string(to_process) <> " (of " <> int.to_string(remaining) <> " remaining)")
   io.println("OK:         " <> int.to_string(state.ok_count))
   io.println("FAIL:       " <> int.to_string(state.fail_count))
-  io.println("SKIP:       " <> int.to_string(state.skip_count))
   io.println("")
-  io.println("Confidence totals:")
+  case state.ok_count + state.fail_count == 0 {
+    True -> Nil
+    False -> case remaining > to_process {
+      True -> io.println("  🔜 left for next run: " <> int.to_string(remaining - to_process))
+      False -> io.println("  🎉 all done!")
+    }
+  }
+  io.println("")
+  io.println("Confidence:")
   io.println("  Exact:    " <> int.to_string(state.exact_total))
   io.println("  Fuzzy:    " <> int.to_string(state.fuzzy_total))
   io.println("  Fallback: " <> int.to_string(state.fallback_total))
