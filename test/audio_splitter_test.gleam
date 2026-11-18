@@ -3,13 +3,13 @@ import gleam/list
 import gleam/option.{Some}
 import gleeunit
 import gleeunit/should
-import alignment/aligner
-import alignment/anchor_extractor
-import alignment/dialogue_types.{Doctor, Patient, Turn}
-import alignment/transcript_parser as parser
-import alignment/trigram_alignment as trigram
-import alignment/whisper_driver.{Segment, Word}
-import alignment/word_matcher.{
+import audio_splitter/aligner
+import audio_splitter/anchor_extractor
+import audio_splitter/dialogue_types.{Doctor, Patient, Turn}
+import audio_splitter/transcript_parser as parser
+import audio_splitter/trigram_alignment as trigram
+import audio_splitter/whisper_driver.{Segment, Word}
+import audio_splitter/word_matcher.{
   type Token,
   Token,
   match_token,

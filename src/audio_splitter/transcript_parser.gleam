@@ -21,7 +21,7 @@
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-import alignment/dialogue_types.{type Turn, type Role, Turn, Doctor, Patient}
+import audio_splitter/dialogue_types.{type Turn, type Role, Turn, Doctor, Patient}
 
 /// Accumulator state for the fold.
 type ParseState {

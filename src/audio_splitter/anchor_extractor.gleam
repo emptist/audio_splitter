@@ -32,8 +32,8 @@
 import gleam/list
 import gleam/int
 import gleam/string
-import alignment/dialogue_types.{type Turn}
-import alignment/word_matcher.{type Token, tokenize}
+import audio_splitter/dialogue_types.{type Turn}
+import audio_splitter/word_matcher.{type Token, tokenize}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

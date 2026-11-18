@@ -23,7 +23,7 @@
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, Some, None}
-import alignment/word_matcher.{
+import audio_splitter/word_matcher.{
   type Token,
   match_token,
   ExactMatch,
@@ -31,11 +31,11 @@ import alignment/word_matcher.{
   FuzzyMatch,
   NoMatch,
 }
-import alignment/anchor_extractor.{
+import audio_splitter/anchor_extractor.{
   type BoundaryAnchor,
   search_window,
 }
-import alignment/whisper_driver.{type Word}
+import audio_splitter/whisper_driver.{type Word}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

@@ -24,17 +24,17 @@ curl -L -o ~/.cache/whisper/ggml-tiny.bin \
 
 ```sh
 # Single dialogue
-gleam run -m alignment /path/to/dialogue.mp3 /path/to/transcript.txt /path/to/output_dir
+gleam run -m audio_splitter /path/to/dialogue.mp3 /path/to/transcript.txt /path/to/output_dir
 
 # Example
-gleam run -m alignment data/GAS0001.mp3 data/GAS0001.txt out/GAS0001
+gleam run -m audio_splitter data/GAS0001.mp3 data/GAS0001.txt out/GAS0001
 ```
 
 ### Batch all dialogues (single VM)
 
 ```sh
 # whisper model loads ONCE and stays cached for ALL dialogues (~5.5h for 272 on CPU)
-gleam run -m batch /path/to/assets_dir
+gleam run -m audio_splitter/batch /path/to/assets_dir
 
 # Expected directory layout:
 #   assets_dir/audio/*.mp3          — input mp3s
@@ -53,7 +53,7 @@ for mp3 in data/audio/*.mp3; do
   txt="data/transcripts/${id}.txt"
   if [ -f "$txt" ]; then
     echo "=== $id ==="
-    gleam run -m alignment "$mp3" "$txt" "out/$id"
+    gleam run -m audio_splitter "$mp3" "$txt" "out/$id"
   fi
 done
 ```
@@ -131,29 +131,34 @@ CAR0001 (121 turns) — 1 Exact, 118 Fuzzy, 2 Fallback.
 
 ## Architecture
 
+All code lives under a single top-level module `audio_splitter` (no namespace pollution):
+
 ```
 src/
-├── alignment.gleam              # Single-dialogue CLI entry + flat pipeline
-├── batch.gleam                  # Batch CLI — single VM, whisper cached, UTF-16 aware
-└── alignment/
-    ├── dialogue_types.gleam     # Generic Turn/Role
-    ├── transcript_parser.gleam  # D:/P: format parser
-    ├── shell.gleam              # @external erlang:os:cmd (single source of truth)
-    ├── file_io.gleam            # @external erlang:file:* (single source of truth)
-    ├── whisper_driver.gleam     # Opaque WhisperModel, word-timestamp decode
-    ├── word_matcher.gleam       # Tokenize + exact/prefix/fuzzy per-word matching
-    ├── anchor_extractor.gleam   # Extract 3-word boundary anchors + proportional expected whisper_index
-    ├── trigram_alignment.gleam  # Slide 6-word anchor through whisper stream, score positions
-    ├── aligner.gleam            # Pipeline orchestrator — extract → match → enforce monotonic
-    ├── splitter.gleam           # ffmpeg extraction
-    └── manifest.gleam           # JSON manifest writer
+└── audio_splitter.gleam              # Main module: single-dialogue CLI + flat pipeline
+└── audio_splitter/
+    ├── batch.gleam                    # Batch CLI — single VM, whisper cached, UTF-16 aware
+    ├── dialogue_types.gleam           # Generic Turn/Role
+    ├── transcript_parser.gleam        # D:/P: format parser
+    ├── shell.gleam                    # @external erlang:os:cmd (single source of truth)
+    ├── file_io.gleam                  # @external erlang:file:* (single source of truth)
+    ├── whisper_driver.gleam           # Opaque WhisperModel, word-timestamp decode
+    ├── word_matcher.gleam             # Tokenize + exact/prefix/fuzzy per-word matching
+    ├── anchor_extractor.gleam         # Extract 3-word boundary anchors + proportional expected whisper_index
+    ├── trigram_alignment.gleam        # Slide 6-word anchor through whisper stream, score positions
+    ├── aligner.gleam                  # Pipeline orchestrator — extract → match → enforce monotonic
+    ├── splitter.gleam                 # ffmpeg extraction
+    └── manifest.gleam                 # JSON manifest writer
 ```
+
+Module names: `audio_splitter`, `audio_splitter.batch`, `audio_splitter.aligner`, etc.
+Consumers `import audio_splitter.aligner`, no conflicts with any other hex package.
 
 ## Transcript encoding support
 
 Transcripts are read as raw bytes and decoded via a pure-Gleam BOM-aware decoder in
-`batch.gleam` (one safe BEAM @external: `erlang:binary_to_list`). All common encodings
-work without any hand-written Erlang:
+`audio_splitter.batch` (one safe BEAM @external: `erlang:binary_to_list`). All common
+encodings work without any hand-written Erlang:
 
 | BOM bytes | Encoding | Decoder action |
 |-----------|----------|----------------|
@@ -163,7 +168,7 @@ work without any hand-written Erlang:
 | None | Plain UTF-8 | Use `bit_array.to_string`, fall back to Latin-1 |
 
 The single-dialogue CLI (`alignment.gleam`) uses `file_io.read_text` which assumes
-UTF-8. For UTF-16 transcripts, either pre-convert with `iconv` or use `gleam run -m batch`.
+UTF-8. For UTF-16 transcripts, either pre-convert with `iconv` or use `gleam run -m audio_splitter/batch`.
 
 ## Gleam patterns enforced
 
@@ -178,8 +183,8 @@ UTF-8. For UTF-16 transcripts, either pre-convert with `iconv` or use `gleam run
 
 ```sh
 gleam build                                # compile (zero warnings expected)
-gleam run -m alignment <mp3> <txt> <out>   # single dialogue CLI
-gleam run -m batch <assets_dir>            # batch CLI (single VM, whisper cached)
+gleam run -m audio_splitter <mp3> <txt> <out>   # single dialogue CLI
+gleam run -m audio_splitter/batch <assets_dir>            # batch CLI (single VM, whisper cached)
 gleam test                                 # run tests
 gleam build --warnings-as-errors           # CI gate
 gleam export hex-tarball                   # prepare hex package

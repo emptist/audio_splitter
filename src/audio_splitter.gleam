@@ -4,7 +4,7 @@
 //// whole thing is flat, not 6 levels of nested callbacks.
 ////
 //// Usage:
-////   gleam run -m alignment <audio.mp3> <transcript.txt> <output_dir>
+////   gleam run -m audio_splitter <audio.mp3> <transcript.txt> <output_dir>
 
 import gleam/erlang/charlist
 import gleam/float
@@ -14,15 +14,15 @@ import gleam/list
 import gleam/option.{None}
 import gleam/result
 import gleam/string
-import alignment/dialogue_types as dialogue_types
-import alignment/transcript_parser
-import alignment/whisper_driver as whisper
-import alignment/aligner
-import alignment/trigram_alignment as trigram
-import alignment/splitter
-import alignment/manifest
-import alignment/shell.{os_cmd, shell_quote}
-import alignment/file_io
+import audio_splitter/dialogue_types as dialogue_types
+import audio_splitter/transcript_parser
+import audio_splitter/whisper_driver as whisper
+import audio_splitter/aligner
+import audio_splitter/trigram_alignment as trigram
+import audio_splitter/splitter
+import audio_splitter/manifest
+import audio_splitter/shell.{os_cmd, shell_quote}
+import audio_splitter/file_io
 
 pub fn main() -> Nil {
   let args = cli_argv()
@@ -33,8 +33,8 @@ pub fn main() -> Nil {
 }
 
 fn print_usage() -> Nil {
-  io.println("Usage: gleam run -m alignment <audio.mp3> <transcript.txt> <output_dir>")
-  io.println("  e.g. gleam run -m alignment assets/audio/GAS0001.mp3 \\")
+  io.println("Usage: gleam run -m audio_splitter <audio.mp3> <transcript.txt> <output_dir>")
+  io.println("  e.g. gleam run -m audio_splitter assets/audio/GAS0001.mp3 \\")
   io.println("                             assets/transcripts/GAS0001.txt \\")
   io.println("                             assets/split/GAS0001")
 }

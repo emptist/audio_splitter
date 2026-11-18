@@ -14,9 +14,9 @@
 
 import gleam/json
 import gleam/list
-import alignment/dialogue_types as dialogue_types
-import alignment/aligner.{type AlignedTurn}
-import alignment/file_io
+import audio_splitter/dialogue_types as dialogue_types
+import audio_splitter/aligner.{type AlignedTurn}
+import audio_splitter/file_io
 
 /// Write manifest.json to output_dir. Returns the path on success.
 pub fn write_manifest(

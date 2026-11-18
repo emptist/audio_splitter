@@ -4,7 +4,7 @@
 //// and stays resident for ALL dialogues. This saves ~10s model reload per
 //// dialogue compared to spawning `gleam run` N times.
 ////
-//// Usage: gleam run -m batch <assets_dir>
+//// Usage: gleam run -m audio_splitter/batch <assets_dir>
 ////   assets_dir/audio/*.mp3
 ////   assets_dir/transcripts/*.txt
 ////   assets_dir/split/<dialogue_id>/turn_NNNN.mp3  ← output
@@ -17,15 +17,15 @@ import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
-import alignment/dialogue_types as dialogue_types
-import alignment/transcript_parser
-import alignment/whisper_driver as whisper
-import alignment/aligner
-import alignment/trigram_alignment as trigram
-import alignment/splitter
-import alignment/manifest
-import alignment/shell.{os_cmd, shell_quote}
-import alignment/file_io
+import audio_splitter/dialogue_types as dialogue_types
+import audio_splitter/transcript_parser
+import audio_splitter/whisper_driver as whisper
+import audio_splitter/aligner
+import audio_splitter/trigram_alignment as trigram
+import audio_splitter/splitter
+import audio_splitter/manifest
+import audio_splitter/shell.{os_cmd, shell_quote}
+import audio_splitter/file_io
 
 // ── BEAM externals ──────────────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ pub fn main() -> Nil {
   let args = init_get_plain_arguments() |> list.map(charlist.to_string)
   case args {
     [assets_dir] -> run_batch(assets_dir)
-    _ -> io.println("Usage: gleam run -m batch <assets_dir>")
+    _ -> io.println("Usage: gleam run -m audio_splitter/batch <assets_dir>")
   }
 }
 

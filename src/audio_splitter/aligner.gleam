@@ -22,14 +22,14 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, Some, None}
 import gleam/string
-import alignment/dialogue_types.{type Turn, type Role}
-import alignment/whisper_driver.{type Word, type Segment, Word}
-import alignment/anchor_extractor.{
+import audio_splitter/dialogue_types.{type Turn, type Role}
+import audio_splitter/whisper_driver.{type Word, type Segment, Word}
+import audio_splitter/anchor_extractor.{
   type BoundaryAnchor,
   BoundaryAnchor,
   extract_anchors,
 }
-import alignment/trigram_alignment.{
+import audio_splitter/trigram_alignment.{
   type Confidence,
   Fallback,
   Exact,

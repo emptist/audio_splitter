@@ -11,7 +11,7 @@ import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
-import alignment/shell.{os_cmd, shell_quote}
+import audio_splitter/shell.{os_cmd, shell_quote}
 
 pub type SplitterError {
   SplitFailed(String)

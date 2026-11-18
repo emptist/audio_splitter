@@ -16,7 +16,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import alignment/shell.{os_cmd}
+import audio_splitter/shell.{os_cmd}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
