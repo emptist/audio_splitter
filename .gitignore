@@ -22,3 +22,6 @@ tmp/
 
 # Dependency caches
 .download/
+
+# BEAM crash dumps
+erl_crash.dump
