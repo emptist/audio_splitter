@@ -20,6 +20,7 @@
 //// Confidence tells you how much to trust each boundary.
 //// Fallback means the trigram didn't match — caller should flag for review.
 
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, Some, None}
 import alignment/word_matcher.{
@@ -59,7 +60,6 @@ pub type BoundaryResult {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const min_total_score: Float = 1.5   // accept if at least half the trigram matched
 const exact_weight: Float = 1.0
 const prefix_weight: Float = 0.8
 const fuzzy_weight: Float = 0.5
@@ -104,6 +104,13 @@ fn search_trigram(
   whisper_ends: List(Float),
   whisper_count: Int,
 ) -> Option(BoundaryResult) {
+  // Dynamic threshold: 0.5 * n where n = actual combined anchor token count.
+  // For normal 3-token anchors → 1.5 (unchanged).
+  // For 2-token anchors (short "No." responses) → 1.0 (requires both match at least fuzzy).
+  // For 1-token anchors → 0.5 (requires at least fuzzy match).
+  let combined_tokens = list.append(anchor.last_tokens, anchor.first_tokens)
+  let threshold = fuzzy_weight *. int.to_float(list.length(combined_tokens))
+
   let #(lo, hi) = search_window(anchor, whisper_count)
 
   // All positions in the window
@@ -131,7 +138,7 @@ fn search_trigram(
   case best {
     None -> None
     Some(#(idx, score)) ->
-      case score >=. min_total_score {
+      case score >=. threshold {
         True -> Some(build_boundary_result(anchor, whisper_starts, whisper_ends, idx, score))
         False -> None
       }
