@@ -198,7 +198,7 @@ fn clamp_aligned_to_duration(
     [
       aligner.AlignedTurn(
         index: t.index,
-        role: t.role,
+        speaker_label: t.speaker_label,
         text: t.text,
         word_count: t.word_count,
         audio_start_s: clamped_start,
@@ -224,7 +224,7 @@ fn print_aligned_turn(t: aligner.AlignedTurn) -> Nil {
   let preview = string.slice(t.text, 0, 40)
   let conf = confidence_label(t.confidence)
   io.println(
-    "    [" <> int.to_string(t.index) <> "] " <> dialogue_types.role_letter(t.role) <> " " <>
+    "    [" <> int.to_string(t.index) <> "] " <> dialogue_types.label_letter(t.speaker_label) <> " " <>
     float.to_string(t.audio_start_s) <> "s–" <>
     float.to_string(t.audio_end_s) <> "s (" <>
     float.to_string(dur) <> "s) [" <> conf <> "]  " <> preview,

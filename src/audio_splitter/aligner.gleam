@@ -22,7 +22,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, Some, None}
 import gleam/string
-import audio_splitter/dialogue_types.{type Turn, type Role}
+import audio_splitter/dialogue_types.{type SpeakerLabel, type Turn}
 import audio_splitter/whisper_driver.{type Word, type Segment, Word}
 import audio_splitter/anchor_extractor.{
   type BoundaryAnchor,
@@ -41,7 +41,7 @@ import audio_splitter/trigram_alignment.{
 pub type AlignedTurn {
   AlignedTurn(
     index: Int,
-    role: Role,
+    speaker_label: SpeakerLabel,
     text: String,
     word_count: Int,
     audio_start_s: Float,
@@ -248,7 +248,7 @@ fn build_aligned_turns(
         let #(start, end) = pair
         AlignedTurn(
           index: turn.index,
-          role: turn.role,
+          speaker_label: turn.speaker_label,
           text: turn.text,
           word_count: count_words(turn.text),
           audio_start_s: start,

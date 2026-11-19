@@ -51,7 +51,7 @@ fn build_manifest_json(
   let turn_objects = list.map(turns, fn(t) {
     json.object([
       #("index", json.int(t.index)),
-      #("role", json.string(dialogue_types.role_letter(t.role))),
+      #("role", json.string(dialogue_types.label_letter(t.speaker_label))),
       #("text", json.string(t.text)),
       #("word_count", json.int(t.word_count)),
       #("audio_start_s", json.float(t.audio_start_s)),

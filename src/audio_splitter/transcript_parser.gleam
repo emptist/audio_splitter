@@ -21,14 +21,14 @@
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-import audio_splitter/dialogue_types.{type Turn, type Role, Turn, Doctor, Patient}
+import audio_splitter/dialogue_types.{type SpeakerLabel, type Turn, Turn, label_from_letter}
 
 /// Accumulator state for the fold.
 type ParseState {
   ParseState(
     index: Int,
     turns: List(Turn),
-    pending_role: Option(Role),
+    pending_speaker: Option(SpeakerLabel),
     pending_text: String,
   )
 }
@@ -40,27 +40,27 @@ pub fn parse_transcript(raw: String) -> List(Turn) {
   |> normalize_line_endings
   |> string.split("\n")
   |> list.fold(
-    ParseState(index: 0, turns: [], pending_role: None, pending_text: ""),
+    ParseState(index: 0, turns: [], pending_speaker: None, pending_text: ""),
     fn(acc, line) {
       let trimmed = string.trim(line)
       case parse_speaker_line(trimmed) {
-        Some(#(role, text)) -> {
+        Some(#(label, text)) -> {
           let acc = finalize_pending(acc)
           ParseState(
             index: acc.index,
             turns: acc.turns,
-            pending_role: Some(role),
+            pending_speaker: Some(label),
             pending_text: text,
           )
         }
         None -> {
-          case acc.pending_role, trimmed {
+          case acc.pending_speaker, trimmed {
             Some(_), "" -> finalize_pending(acc)
             Some(_), cont ->
               ParseState(
                 index: acc.index,
                 turns: acc.turns,
-                pending_role: acc.pending_role,
+                pending_speaker: acc.pending_speaker,
                 pending_text: acc.pending_text <> " " <> cont,
               )
             None, _ -> acc
@@ -75,29 +75,37 @@ pub fn parse_transcript(raw: String) -> List(Turn) {
 
 /// If a turn is being built, finalize it and bump index.
 fn finalize_pending(state: ParseState) -> ParseState {
-  case state.pending_role {
+  case state.pending_speaker {
     None -> state
-    Some(role) -> {
-      let turn = Turn(index: state.index, role:, text: string.trim(state.pending_text))
+    Some(label) -> {
+      let turn = Turn(index: state.index, speaker_label: label, text: string.trim(state.pending_text))
       ParseState(
         index: state.index + 1,
         turns: [turn, ..state.turns],
-        pending_role: None,
+        pending_speaker: None,
         pending_text: "",
       )
     }
   }
 }
 
-/// Detect and extract the speaker role and text from one line.
+/// Detect and extract the speaker label and text from one line.
 /// Returns `None` if the line doesn't match "D: ..." or "P: ...".
-pub fn parse_speaker_line(line: String) -> Option(#(Role, String)) {
+pub fn parse_speaker_line(line: String) -> Option(#(SpeakerLabel, String)) {
   let trimmed = string.trim(line)
   case string.starts_with(trimmed, "D:") {
-    True -> Some(#(Doctor, string.trim(string.drop_start(trimmed, 2))))
+    True ->
+      case label_from_letter("D") {
+        Some(label) -> Some(#(label, string.trim(string.drop_start(trimmed, 2))))
+        None -> None
+      }
     False ->
       case string.starts_with(trimmed, "P:") {
-        True -> Some(#(Patient, string.trim(string.drop_start(trimmed, 2))))
+        True ->
+          case label_from_letter("P") {
+            Some(label) -> Some(#(label, string.trim(string.drop_start(trimmed, 2))))
+            None -> None
+          }
         False -> None
       }
   }

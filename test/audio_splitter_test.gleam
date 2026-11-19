@@ -5,7 +5,7 @@ import gleeunit
 import gleeunit/should
 import audio_splitter/aligner
 import audio_splitter/anchor_extractor
-import audio_splitter/dialogue_types.{Doctor, Patient, Turn}
+import audio_splitter/dialogue_types.{LabelDoctor, LabelPatient, SpeakerA, SpeakerB, Turn}
 import audio_splitter/transcript_parser as parser
 import audio_splitter/trigram_alignment as trigram
 import audio_splitter/whisper_driver.{Segment, Word}
@@ -69,7 +69,7 @@ pub fn align_no_turns_test() {
 }
 
 pub fn align_no_words_test() {
-  let turns = [Turn(index: 0, role: Doctor, text: "hello")]
+  let turns = [Turn(index: 0, speaker_label: LabelDoctor(SpeakerA), text: "hello")]
   case aligner.align_turns(turns, [], 5.0) {
     Error(aligner.NoWordTimestamps) -> Nil
     _ -> panic
@@ -77,14 +77,14 @@ pub fn align_no_words_test() {
 }
 
 pub fn align_single_turn_anchors_test() {
-  let turns = [Turn(index: 0, role: Doctor, text: "hi")]
+  let turns = [Turn(index: 0, speaker_label: LabelDoctor(SpeakerA), text: "hi")]
   let words = [Word(text: "hi", start: 0.5, end: 0.7, probability: 1.0, segment_index: 0)]
   case aligner.align_turns(turns, words, 5.0) {
     Ok(aligned) -> {
       case list.first(aligned) {
         Ok(a) -> {
           should.equal(a.index, 0)
-          should.equal(a.role, Doctor)
+          should.equal(a.speaker_label, LabelDoctor(SpeakerA))
           let start_ok = float.absolute_value(a.audio_start_s -. 0.0) <. 0.01
           let end_ok = float.absolute_value(a.audio_end_s -. 5.0) <. 0.01
           should.be_true(start_ok)
@@ -104,14 +104,14 @@ pub fn extract_anchors_no_turns_test() {
 }
 
 pub fn extract_anchors_one_turn_test() {
-  let turns = [Turn(index: 0, role: Doctor, text: "hello world")]
+  let turns = [Turn(index: 0, speaker_label: LabelDoctor(SpeakerA), text: "hello world")]
   should.equal(anchor_extractor.extract_anchors(turns, 100), [])
 }
 
 pub fn extract_anchors_two_turns_test() {
   let turns = [
-    Turn(index: 0, role: Doctor, text: "Hello"),
-    Turn(index: 1, role: Patient, text: "Hi there"),
+    Turn(index: 0, speaker_label: LabelDoctor(SpeakerA), text: "Hello"),
+    Turn(index: 1, speaker_label: LabelPatient(SpeakerB), text: "Hi there"),
   ]
   let anchors = anchor_extractor.extract_anchors(turns, 4)
   should.equal(list.length(anchors), 1)
@@ -200,8 +200,8 @@ pub fn trigram_empty_anchors_test() {
 
 pub fn trigram_perfect_match_test() {
   let turns = [
-    Turn(index: 0, role: Doctor, text: "OK do you find"),
-    Turn(index: 1, role: Patient, text: "No I don't"),
+    Turn(index: 0, speaker_label: LabelDoctor(SpeakerA), text: "OK do you find"),
+    Turn(index: 1, speaker_label: LabelPatient(SpeakerB), text: "No I don't"),
   ]
   let anchors = anchor_extractor.extract_anchors(turns, 6)
   // whisper words exactly matching the boundary trigram
@@ -232,11 +232,11 @@ pub fn trigram_perfect_match_test() {
 // ── transcript_parser ──────────────────────────────────────────────────────
 
 pub fn parse_speaker_line_doctor_test() {
-  should.equal(parser.parse_speaker_line("D: hello"), Some(#(Doctor, "hello")))
+  should.equal(parser.parse_speaker_line("D: hello"), Some(#(LabelDoctor(SpeakerA), "hello")))
 }
 
 pub fn parse_speaker_line_patient_test() {
-  should.equal(parser.parse_speaker_line("P: hi there"), Some(#(Patient, "hi there")))
+  should.equal(parser.parse_speaker_line("P: hi there"), Some(#(LabelPatient(SpeakerB), "hi there")))
 }
 
 pub fn parse_empty_test() {
@@ -248,7 +248,7 @@ pub fn parse_basic_dialogue_test() {
   let turns = parser.parse_transcript(raw)
   should.equal(list.length(turns), 3)
   should.equal(list.map(turns, fn(t) { t.index }), [0, 1, 2])
-  should.equal(list.map(turns, fn(t) { t.role }), [Doctor, Patient, Doctor])
+  should.equal(list.map(turns, fn(t) { t.speaker_label }), [LabelDoctor(SpeakerA), LabelPatient(SpeakerB), LabelDoctor(SpeakerA)])
 }
 
 pub fn parse_continuation_line_test() {

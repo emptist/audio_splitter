@@ -383,7 +383,7 @@ fn clamp_aligned_to_duration(
     }
     [
       aligner.AlignedTurn(
-        index: t.index, role: t.role, text: t.text, word_count: t.word_count,
+        index: t.index, speaker_label: t.speaker_label, text: t.text, word_count: t.word_count,
         audio_start_s: clamped_start, audio_end_s: clamped_end, confidence: t.confidence,
       ),
       ..acc
