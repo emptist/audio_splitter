@@ -1,7 +1,7 @@
 name = "audio_splitter"
-version = "2.0.0"
+version = "2.0.1"
 target = "erlang"
-description = "Transcribe dialogue audio with whisper_cpp, align word timestamps to transcript turns, and split mp3 per turn into lossless per-turn clips with a JSON manifest. Generic — works with any D:/P: speaker-prefix dialogue format."
+description = "Transcribe dialogue audio with whisper_cpp, align word timestamps to transcript turns, and split mp3 per turn into lossless per-turn clips with an ETF manifest. Generic — works with any D:/P: speaker-prefix dialogue format."
 licences = ["Apache-2.0"]
 
 [dependencies]

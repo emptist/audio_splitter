@@ -415,7 +415,7 @@ fn count_transcript_turns(path: String) -> Int {
 }
 
 fn is_already_done(out_dir: String) -> Bool {
-  case file_io.read_text(out_dir <> "/manifest.json") {
+  case file_io.read_binary(out_dir <> "/manifest.etf") {
     Ok(_) -> True
     Error(_) -> False
   }

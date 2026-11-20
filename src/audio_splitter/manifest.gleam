@@ -1,24 +1,50 @@
-//// JSON manifest writer — one manifest per dialogue directory.
+//// ETF manifest writer — one manifest per dialogue directory.
 ////
-//// Output format (per dialogue):
-////   {
-////     "dialogue_id": "GAS0001",
-////     "audio_file": "GAS0001.mp3",
-////     "transcript_file": "GAS0001.txt",
-////     "duration_s": 565.2,
-////     "turn_count": 75,
-////     "turns": [{ "index", "role", "text", "audio_path", "audio_start_s", "audio_end_s", ... }]
-////   }
+//// Output: `manifest.etf` (OTP External Term Format) — the whole manifest
+//// container type serialised in one `term_to_binary` call. No JSON codec,
+//// no string downgrades — AlignedTurn.SpeakerLabel variant tags preserved
+//// intact. Compare glibe §6.6: "Let types speak for themselves, don't add
+//// a codec layer."
 ////
-//// Returns Result — file write failure is not silently ignored.
+//// Reader calls `etf_codec.decode(bits)` on the same container type —
+//// infallible within the same VM (all binaries produced here, never
+//// hand-written).
 
-import gleam/json
 import gleam/list
 import audio_splitter/dialogue_types as dialogue_types
 import audio_splitter/aligner.{type AlignedTurn}
 import audio_splitter/file_io
 
-/// Write manifest.json to output_dir. Returns the path on success.
+/// Container type — one per dialogue directory.
+/// Every SpeakerLabel variant, every Float precision, every confidence tag
+/// preserved intact by term_to_binary. No string codec anywhere.
+pub type ManifestSum {
+  Manifest(
+    dialogue_id: String,
+    audio_file: String,
+    transcript_file: String,
+    duration_s: Float,
+    turns: List(ManifestTurn),
+  )
+}
+
+pub type ManifestTurn {
+  ManifestTurn(
+    index: Int,
+    speaker_label: dialogue_types.SpeakerLabel,
+    text: String,
+    word_count: Int,
+    audio_start_s: Float,
+    audio_end_s: Float,
+    duration_s: Float,
+    audio_path: String,
+  )
+}
+
+@external(erlang, "erlang", "term_to_binary")
+fn to_etf(term: a) -> BitArray
+
+/// Write manifest.etf to output_dir. Returns the path on success.
 pub fn write_manifest(
   dialogue_id: String,
   audio_file: String,
@@ -27,46 +53,30 @@ pub fn write_manifest(
   turns: List(AlignedTurn),
   output_dir: String,
 ) -> Result(String, file_io.FileError) {
-  let manifest = build_manifest_json(
-    dialogue_id,
-    audio_file,
-    transcript_file,
-    duration_s,
-    turns,
+  let manifest = Manifest(
+    dialogue_id:,
+    audio_file:,
+    transcript_file:,
+    duration_s:,
+    turns: list.map(turns, build_manifest_turn),
   )
-  let path = output_dir <> "/manifest.json"
-  case file_io.write_text(path, manifest) {
+  let path = output_dir <> "/manifest.etf"
+  case file_io.write_binary(path, to_etf(manifest)) {
     Ok(_) -> Ok(path)
     Error(e) -> Error(e)
   }
 }
 
-fn build_manifest_json(
-  dialogue_id: String,
-  audio_file: String,
-  transcript_file: String,
-  duration_s: Float,
-  turns: List(AlignedTurn),
-) -> String {
-  let turn_objects = list.map(turns, fn(t) {
-    json.object([
-      #("index", json.int(t.index)),
-      #("role", json.string(dialogue_types.label_letter(t.speaker_label))),
-      #("text", json.string(t.text)),
-      #("word_count", json.int(t.word_count)),
-      #("audio_start_s", json.float(t.audio_start_s)),
-      #("audio_end_s", json.float(t.audio_end_s)),
-      #("duration_s", json.float(t.audio_end_s -. t.audio_start_s)),
-      #("audio_path", json.string(dialogue_types.turn_filename(t.index))),
-    ])
-  })
-
-  json.to_string(json.object([
-    #("dialogue_id", json.string(dialogue_id)),
-    #("audio_file", json.string(audio_file)),
-    #("transcript_file", json.string(transcript_file)),
-    #("duration_s", json.float(duration_s)),
-    #("turn_count", json.int(list.length(turns))),
-    #("turns", json.array(turn_objects, of: fn(x) { x })),
-  ]))
+fn build_manifest_turn(t: AlignedTurn) -> ManifestTurn {
+  let duration = t.audio_end_s -. t.audio_start_s
+  ManifestTurn(
+    index: t.index,
+    speaker_label: t.speaker_label,
+    text: t.text,
+    word_count: t.word_count,
+    audio_start_s: t.audio_start_s,
+    audio_end_s: t.audio_end_s,
+    duration_s: duration,
+    audio_path: dialogue_types.turn_filename(t.index),
+  )
 }

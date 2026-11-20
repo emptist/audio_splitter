@@ -109,7 +109,7 @@ fn run(audio_path: String, transcript_path: String, output_dir: String) -> Resul
     |> result.map_error(fn(e) { describe_splitter_error(e) }))
 
   // 6. Write manifest
-  io.println("[6/6] Writing manifest.json...")
+  io.println("[6/6] Writing manifest.etf...")
   use manifest_path <- result.try(manifest.write_manifest(
     dialogue_id,
     filename_from_path(audio_path),

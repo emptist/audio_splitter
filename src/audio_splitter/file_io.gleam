@@ -23,6 +23,9 @@ fn raw_read_file(path: String) -> dynamic.Dynamic
 @external(erlang, "file", "write_file")
 fn raw_write_file(path: String, content: String) -> dynamic.Dynamic
 
+@external(erlang, "file", "write_file")
+fn raw_write_bits(path: String, content: BitArray) -> dynamic.Dynamic
+
 @external(erlang, "file", "make_dir")
 fn raw_make_dir(path: String) -> dynamic.Dynamic
 
@@ -74,6 +77,22 @@ pub fn read_binary(path: String) -> Result(BitArray, FileError) {
 /// Write a String to a file.
 pub fn write_text(path: String, content: String) -> Result(Nil, FileError) {
   case raw_write_file(path, content) {
+    raw -> case decode.run(raw, atom.decoder()) {
+      Ok(tag) -> {
+        case atom.to_string(tag) {
+          "ok" -> Ok(Nil)
+          "enotdir" -> Error(NotFound)
+          other -> Error(Unknown(other))
+        }
+      }
+      Error(_) -> Error(DecodeFailed)
+    }
+  }
+}
+
+/// Write a BitArray to a file (ETF or other binary formats).
+pub fn write_binary(path: String, content: BitArray) -> Result(Nil, FileError) {
+  case raw_write_bits(path, content) {
     raw -> case decode.run(raw, atom.decoder()) {
       Ok(tag) -> {
         case atom.to_string(tag) {
